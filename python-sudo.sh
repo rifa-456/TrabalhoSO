@@ -1,2 +1,2 @@
 #!/bin/bash
-sudo /usr/bin/python3 -u "$@"
+sudo /usr/bin/python -u "$@"

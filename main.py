@@ -8,12 +8,26 @@ import signal
 import subprocess
 import time
 
+# This options class MUST contain the attributes the library's
+# automatic formatting functions will look for.
+class SyscallOptions:
+    def __init__(self):
+        # Max length of a string read from the child's memory.
+        self.string_max_length = 256
+        # Max number of elements to read from an array (e.g., for execve).
+        self.max_array_count = 20
+        # These were the original flags.
+        self.write_argname = True
+        self.write_types = True
+        self.write_address = True
+        self.instr_pointer = False
+        self.replace_socketcall = False
 
 def run_dummy_process():
     """Launch a dummy process and return its PID"""
     process = subprocess.Popen(['python3', 'dummy.py'],
-                              stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE)
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE)
     # Give it time to start
     time.sleep(1)
     output = process.stdout.readline().decode().strip()
@@ -46,47 +60,46 @@ def attach_and_trace(pid):
         print(f"[*] Successfully attached to PID: {pid}. Tracing syscalls...")
         print("-" * 60)
 
-        # Track whether we're entering or exiting a syscall
-        in_syscall = False
-
         process.syscall()
         while True:
             try:
                 event = debugger.waitSyscall()
                 process_event = event.process
 
-                # Toggle between syscall entry and exit
-                if in_syscall:
-                    # Exiting syscall
-                    syscall = process_event.syscall_state.syscall
-                    result = process_event.syscall_state.result
-                    print(f"SYSCALL EXIT: {syscall.name} = {result}")
-                    in_syscall = False
+                if process_event.syscall_state.syscall:
+                    # EXIT: The syscall object exists from the entry.
+                    syscall = process_event.syscall_state.exit()
+
+                    if syscall:
+                        result = syscall.result_text
+                        print(f"SYSCALL EXIT: {syscall.name} = {result}")
                 else:
-                    # Entering syscall
+                    # ENTER: No syscall object exists yet.
+                    options = SyscallOptions()
+                    process_event.syscall_state.enter(options)
                     syscall = process_event.syscall_state.syscall
 
-                    # Get arguments from registers instead of trying to use arguments attribute
-                    arg_values = []
-                    for reg in process_event.syscall_state.registers:
-                        if reg.startswith('arg'):  # arg0, arg1, etc.
-                            arg_values.append(process_event.syscall_state.registers[reg])
+                    if syscall:
+                        # --- THE FINAL FIX ---
+                        # We must explicitly call .format() on each argument.
+                        # This tells the library to do the expensive work of
+                        # reading memory and dereferencing pointers. It will now
+                        # work because our options object is complete.
+                        for arg in syscall.arguments:
+                            print(arg.format())
+                        # --- END OF FIX ---
 
-                    arg_str = ", ".join(str(arg) for arg in arg_values)
-                    print(f"SYSCALL ENTER: {syscall.name}({arg_str})")
-                    in_syscall = True
+                        print(f"SYSCALL ENTER: {syscall.name}")
 
             except ProcessExit as e:
                 print(f"\n[*] Process {e.pid} exited with code {e.exit_code}.")
                 break
             except ProcessSignal as e:
-                e.display()  # Use the display method from ProcessSignal
-                # Continue tracing after signal
+                e.display()
             except Exception as e:
                 print(f"\n[!] An unexpected error occurred: {e}")
                 break
 
-            # Allow the traced process to continue to the next syscall
             process_event.syscall()
 
     except Exception as e:
@@ -107,18 +120,11 @@ if __name__ == "__main__":
         type=int,
         help="The Process ID (PID) of the program to attach to."
     )
-    parser.add_argument(
-        "--test",
-        action="store_true",
-        help="Run a test dummy process and trace it"
-    )
     args = parser.parse_args()
     if os.geteuid() != 0:
         print("[!] This script must be run as root to use ptrace.")
         sys.exit(1)
-    if args.test:
-        pid = run_dummy_process()
-    elif args.pid:
+    if args.pid:
         pid = args.pid
     else:
         print("[!] You must provide either a PID (-p) or use --test flag")
