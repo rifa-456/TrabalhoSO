@@ -1,6 +1,12 @@
 import os
 import time
 
-while True:
-    print(f"Process ID: {os.getpid()}")
-    time.sleep(5)
+
+if __name__ == "__main__":
+    print(f"Starting dummy process with PID: {os.getpid()}")
+    try:
+        while True:
+            print(f"Process still running with PID: {os.getpid()}")
+            time.sleep(5)
+    except KeyboardInterrupt:
+        print("Process terminated by user")

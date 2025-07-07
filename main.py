@@ -3,56 +3,91 @@ import sys
 import argparse
 from datetime import datetime
 from ptrace.debugger import PtraceDebugger, ProcessExit, ProcessSignal
+import os
+import signal
+import subprocess
+import time
+
+
+def run_dummy_process():
+    """Launch a dummy process and return its PID"""
+    process = subprocess.Popen(['python3', 'dummy.py'],
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE)
+    # Give it time to start
+    time.sleep(1)
+    output = process.stdout.readline().decode().strip()
+    pid = int(output.split(':')[1].strip())
+    print(f"Started dummy process with PID: {pid}")
+    return pid
+
+def is_process_running(pid):
+    """Check if the process with given PID is running"""
+    try:
+        os.kill(pid, 0)  # Signal 0 doesn't kill the process but checks if it exists
+        return True
+    except OSError:
+        return False
+
 
 def attach_and_trace(pid):
     """
     Attaches to an existing process by its PID and logs its syscalls.
     """
+    if not is_process_running(pid):
+        print(f"[!] Process {pid} does not exist. Please check the PID.")
+        return
+
     print(f"[*] Attempting to attach to PID: {pid}\n")
 
     debugger = PtraceDebugger()
     try:
-        # Attach to the existing process.
-        # is_attached=True is crucial for attaching, not creating.
-        process = debugger.addProcess(pid, is_attached=True)
+        process = debugger.addProcess(pid, is_attached=False)
         print(f"[*] Successfully attached to PID: {pid}. Tracing syscalls...")
         print("-" * 60)
 
-        # Main loop to capture syscalls
+        # Track whether we're entering or exiting a syscall
+        in_syscall = False
+
+        process.syscall()
         while True:
-            # Wait for the next syscall event from the process
             try:
                 event = debugger.waitSyscall()
+                process_event = event.process
+
+                # Toggle between syscall entry and exit
+                if in_syscall:
+                    # Exiting syscall
+                    syscall = process_event.syscall_state.syscall
+                    result = process_event.syscall_state.result
+                    print(f"SYSCALL EXIT: {syscall.name} = {result}")
+                    in_syscall = False
+                else:
+                    # Entering syscall
+                    syscall = process_event.syscall_state.syscall
+
+                    # Get arguments from registers instead of trying to use arguments attribute
+                    arg_values = []
+                    for reg in process_event.syscall_state.registers:
+                        if reg.startswith('arg'):  # arg0, arg1, etc.
+                            arg_values.append(process_event.syscall_state.registers[reg])
+
+                    arg_str = ", ".join(str(arg) for arg in arg_values)
+                    print(f"SYSCALL ENTER: {syscall.name}({arg_str})")
+                    in_syscall = True
+
             except ProcessExit as e:
                 print(f"\n[*] Process {e.pid} exited with code {e.exit_code}.")
                 break
+            except ProcessSignal as e:
+                e.display()  # Use the display method from ProcessSignal
+                # Continue tracing after signal
             except Exception as e:
                 print(f"\n[!] An unexpected error occurred: {e}")
                 break
 
-            # A syscall event was captured
-            syscall = event.syscall
-
-            if syscall:
-                # 'is_enter' is True when the syscall is first made
-                if syscall.is_enter:
-                    timestamp = datetime.now().isoformat()
-                    syscall_name = syscall.name
-                    arguments = syscall.arguments
-
-                    # Format arguments for clear display
-                    formatted_args = ", ".join(map(str, arguments))
-
-                    # Print without a newline to keep entry and exit on the same line
-                    print(f"[{timestamp}] PID: {pid} | {syscall_name}({formatted_args})", end='', flush=True)
-
-                # 'is_enter' is False when the syscall returns
-                else:
-                    return_value = syscall.result
-                    print(f" = {return_value}")
-
             # Allow the traced process to continue to the next syscall
-            process.syscall()
+            process_event.syscall()
 
     except Exception as e:
         print(f"[!] Failed to attach or trace PID {pid}. Error: {e}")
@@ -70,15 +105,22 @@ if __name__ == "__main__":
     parser.add_argument(
         "-p", "--pid",
         type=int,
-        required=True,
         help="The Process ID (PID) of the program to attach to."
     )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Run a test dummy process and trace it"
+    )
     args = parser.parse_args()
-
-    # 2. Check for root privileges, which are required for ptrace
     if os.geteuid() != 0:
         print("[!] This script must be run as root to use ptrace.")
         sys.exit(1)
-
-    # 3. Call the main tracing function
-    attach_and_trace(args.pid)
+    if args.test:
+        pid = run_dummy_process()
+    elif args.pid:
+        pid = args.pid
+    else:
+        print("[!] You must provide either a PID (-p) or use --test flag")
+        sys.exit(1)
+    attach_and_trace(pid)
