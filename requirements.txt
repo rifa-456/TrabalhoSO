@@ -1,0 +1,6 @@
+psutil
+python-ptrace
+inquirer
+rich
+art
+loguru
